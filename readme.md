@@ -1,7 +1,5 @@
 # json2csv
 
-**ALPHA**
-
 ## Introduction
 
 I love using the Javascript [json2csv](https://github.com/zemirco/json2csv) library. It's a great tool for following the [Data Science at the Command Line](https://www.datascienceatthecommandline.com/) philosophy. I wanted to attempt a rewrite in Rust in order to improve the performance and add some features I have missed.
