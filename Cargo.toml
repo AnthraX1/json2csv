@@ -5,6 +5,8 @@ authors = ["alex wennerberg <alex@alexwennerberg.com>"]
 edition = "2018"
 description = "A tool to convert JSON to CSV"
 license = "MIT"
+repository = "https://github.com/alexwennerberg/json2csv"
+exclude = ["foo", "foo.csv", "out.csv"]
 
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
