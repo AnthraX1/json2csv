@@ -7,9 +7,6 @@ description = "A tool to convert JSON to CSV"
 license = "MIT"
 
 [dependencies]
-serde_json = { version= "1.x",features= ["preserve_order"]}
-serde = { version = "1.x", features = ["derive"] }
-csv = "1"
-clap = "2"
-linked_hash_set = "0.x"
+serde_json = { version = "1", features = ["preserve_order"] }
+pico-args = "0.5"
 rust-flatten-json = "0.1.0"

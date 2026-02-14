@@ -1,20 +1,18 @@
-/// Tools to convert a json to a csv
-extern crate csv;
-extern crate linked_hash_set;
-use linked_hash_set::LinkedHashSet;
+/// Tools to convert JSON to CSV
 use serde_json::{json, Deserializer, Value};
+use std::collections::HashSet;
 use std::error::Error;
 use std::io::{BufRead, Write};
-use std::str;
 
 mod unwind_json;
 
-/// Take a reader and a writer, read the json from the reader,
-/// write to the writer. Perform flatten and unwind transofmrations
-/// Sorts output fields by default
+/// Take a reader and a writer, read JSON from the reader,
+/// write CSV to the writer. Supports JSON arrays and newline-delimited JSON.
+/// Performs optional flatten and unwind transformations.
+/// Output keys are sorted alphabetically by default.
 pub fn write_json_to_csv(
     mut rdr: impl BufRead,
-    wtr: impl Write,
+    mut wtr: impl Write,
     fields: Option<Vec<&str>>,
     delimiter: Option<String>,
     flatten: bool,
@@ -22,55 +20,97 @@ pub fn write_json_to_csv(
     samples: Option<u32>,
     double_quote: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let mut csv_writer = csv::WriterBuilder::new()
-        .delimiter(delimiter.unwrap_or(",".to_string()).as_bytes()[0])
-        .double_quote(double_quote)
-        .from_writer(wtr);
-    let stream = Deserializer::from_reader(&mut rdr)
-        .into_iter::<Value>()
-        .flat_map(|item| preprocess(item.unwrap(), flatten, &unwind_on));
-    let mut detected_headers = LinkedHashSet::new();
-    let mut count = 0u32;
+    let delim_byte = delimiter.as_deref().unwrap_or(",").as_bytes()[0];
+    let samples = samples.unwrap_or(1);
 
-    // cached_values stores items from stream that used to detect headers
-    let mut cached_values = <Vec<serde_json::Value>>::new();
+    let mut stream = Deserializer::from_reader(&mut rdr)
+        .into_iter::<Value>();
 
-    for item in stream {
-        cached_values.push(item.clone());
-        count += 1;
-        if count > samples.unwrap() {
-            break;
-        }
-        for (key, _obj) in item.as_object().expect("root element is not an object -- you may be passing in a JSON array. Split up json records using a tool like jq '.[]'").iter() {
-            detected_headers.insert_if_absent(key.to_string());
+    let mut cached_values: Vec<Value> = Vec::new();
+    let mut detected_headers: Vec<String> = Vec::new();
+    let mut header_set = HashSet::new();
+    let mut values_read = 0u32;
+
+    // Phase 1: Read `samples` top-level values, expanding arrays into individual records
+    while values_read < samples {
+        match stream.next() {
+            Some(Ok(value)) => {
+                values_read += 1;
+                let expanded = expand_value(value, flatten, &unwind_on);
+                cached_values.extend(expanded);
+            }
+            Some(Err(e)) => return Err(format!("Error parsing JSON: {}", e).into()),
+            None => break,
         }
     }
-    let headers = match fields {
+
+    // Detect headers from all cached values
+    for item in &cached_values {
+        match item.as_object() {
+            Some(obj) => {
+                for (key, _) in obj.iter() {
+                    if header_set.insert(key.clone()) {
+                        detected_headers.push(key.clone());
+                    }
+                }
+            }
+            None => {
+                return Err(
+                    "JSON input contains non-object values. Each record must be a JSON object."
+                        .into(),
+                );
+            }
+        }
+    }
+
+    // Sort headers alphabetically for predictable output
+    detected_headers.sort();
+
+    let headers: Vec<&str> = match fields {
         Some(f) => f,
-        None => detected_headers.iter().map(|x| x.as_str()).collect(),
+        None => detected_headers.iter().map(|s| s.as_str()).collect(),
     };
-    csv_writer.write_record(convert_header_to_csv_record(&headers)?)?;
-    for item in cached_values {
-        csv_writer.write_record(convert_json_record_to_csv_record(&headers, &item)?)?;
+
+    // Write header row
+    let header_record: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+    write_csv_record(&mut wtr, &header_record, delim_byte, double_quote)?;
+
+    // Write cached values
+    for item in &cached_values {
+        let record = build_csv_record(&headers, item);
+        write_csv_record(&mut wtr, &record, delim_byte, double_quote)?;
     }
-    //free cached values
-    cached_values = vec![];
-    let stream = Deserializer::from_reader(&mut rdr)
-        .into_iter::<Value>()
-        .flat_map(|item| preprocess(item.unwrap(), flatten, &unwind_on));
-    for item in stream {
-        csv_writer.write_record(convert_json_record_to_csv_record(&headers, &item)?)?;
+
+    // Continue streaming remaining values from the reader
+    for result in stream {
+        let value = result.map_err(|e| format!("Error parsing JSON: {}", e))?;
+        let expanded = expand_value(value, flatten, &unwind_on);
+        for item in expanded {
+            let record = build_csv_record(&headers, &item);
+            write_csv_record(&mut wtr, &record, delim_byte, double_quote)?;
+        }
     }
+
     Ok(())
 }
 
-/// Handle the flattening and unwinding of a value
-/// Note that when unwinding a large array, all the array values
-/// are held in memory. This could be improved.
+/// Expand a top-level JSON array into individual items, then preprocess each.
+/// Non-array values are preprocessed directly.
+fn expand_value(value: Value, flatten: bool, unwind_on: &Option<String>) -> Vec<Value> {
+    match value {
+        Value::Array(arr) => arr
+            .into_iter()
+            .flat_map(|v| preprocess(v, flatten, unwind_on))
+            .collect(),
+        _ => preprocess(value, flatten, unwind_on),
+    }
+}
+
+/// Handle the flattening and unwinding of a value.
 fn preprocess(item: Value, flatten: bool, unwind_on: &Option<String>) -> Vec<Value> {
     let mut container: Vec<Value> = Vec::new();
     match unwind_on {
-        Some(f) => container.extend(unwind_json::unwind_json(item, f)), // push all items
+        Some(f) => container.extend(unwind_json::unwind_json(item, f)),
         None => container.push(item),
     }
     if flatten {
@@ -85,34 +125,50 @@ fn preprocess(item: Value, flatten: bool, unwind_on: &Option<String>) -> Vec<Val
     container
 }
 
-pub fn convert_header_to_csv_record(headers: &Vec<&str>) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut record = Vec::new();
-    for item in headers {
-        record.push(String::from(item.clone()));
-    }
-    Ok(record)
+/// Build a CSV record from a JSON object, matching the given headers.
+fn build_csv_record(headers: &[&str], json_map: &Value) -> Vec<String> {
+    headers
+        .iter()
+        .map(|header| match json_map.get(*header) {
+            Some(value) => match value {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            },
+            None => String::new(),
+        })
+        .collect()
 }
 
-pub fn convert_json_record_to_csv_record(
-    headers: &Vec<&str>,
-    json_map: &Value,
-) -> Result<Vec<String>, Box<dyn Error>> {
-    // iterate over headers
-    // if header is present in record, add it
-    // if not, blank string
-    let mut record = Vec::new();
-    for item in headers {
-        let value = json_map.get(&item.to_string());
-        let csv_result = match value {
-            Some(header_item) => match header_item.as_str() {
-                Some(s) => String::from(s),
-                None => header_item.to_string(),
-            },
-            None => String::from(""),
-        };
-        record.push(csv_result)
+/// Escape a CSV value, quoting it if it contains the delimiter, quotes, or newlines.
+fn escape_csv(value: &str, delimiter: u8, double_quote: bool) -> String {
+    let delim = delimiter as char;
+    let needs_quoting =
+        value.contains(delim) || value.contains('\n') || value.contains('\r') || value.contains('"');
+    if !needs_quoting {
+        return value.to_string();
     }
-    Ok(record)
+    if double_quote {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    }
+}
+
+/// Write a single CSV record (one line) to the writer.
+fn write_csv_record(
+    wtr: &mut impl Write,
+    record: &[String],
+    delimiter: u8,
+    double_quote: bool,
+) -> Result<(), Box<dyn Error>> {
+    let delim = String::from(delimiter as char);
+    let escaped: Vec<String> = record
+        .iter()
+        .map(|v| escape_csv(v, delimiter, double_quote))
+        .collect();
+    writeln!(wtr, "{}", escaped.join(&delim))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -142,7 +198,7 @@ mod test {
             double_quote,
         )
         .unwrap();
-        let str_out = str::from_utf8(&output).unwrap();
+        let str_out = std::str::from_utf8(&output).unwrap();
         assert_eq!(str_out, expected)
     }
 
@@ -157,7 +213,7 @@ mod test {
             false,
             None,
             Some(1),
-            false
+            false,
         )
     }
 
@@ -171,7 +227,7 @@ mod test {
             true,
             None,
             Some(1),
-            false
+            false,
         );
         run_test(
             r#"{"array": [1,2] }"#,
@@ -181,7 +237,7 @@ mod test {
             true,
             None,
             Some(1),
-            false
+            false,
         );
     }
 
@@ -195,7 +251,7 @@ mod test {
             false,
             Option::from(String::from("b")),
             Some(1),
-            false
+            false,
         );
     }
 
@@ -209,7 +265,7 @@ mod test {
             false,
             None,
             Some(1),
-            false
+            false,
         )
     }
 
@@ -223,7 +279,74 @@ mod test {
             true,
             Option::from(String::from("b")),
             Some(1),
-            false
+            false,
         );
+    }
+
+    // Issue #3, #8: Support JSON array input
+    #[test]
+    fn test_array_input() {
+        run_test(
+            r#"[{"a": 1, "b": 2}, {"a": 3, "b": 4}]"#,
+            "a,b\n1,2\n3,4\n",
+            None,
+            None,
+            false,
+            None,
+            Some(1),
+            false,
+        )
+    }
+
+    // Issue #11: Sort output keys
+    #[test]
+    fn test_sorted_keys() {
+        run_test(
+            r#"{"z": 1, "a": 2, "m": 3}"#,
+            "a,m,z\n2,3,1\n",
+            None,
+            None,
+            false,
+            None,
+            Some(1),
+            false,
+        )
+    }
+
+    // Issue #2: Detect headers from all cached values, not just the first
+    #[test]
+    fn test_samples_detect_all_headers() {
+        run_test(
+            r#"[{"a": 1}, {"a": 2, "b": 3}]"#,
+            "a,b\n1,\n2,3\n",
+            None,
+            None,
+            false,
+            None,
+            Some(1),
+            false,
+        )
+    }
+
+    // Issue #9: Non-object values produce clear error
+    #[test]
+    fn test_non_object_error() {
+        let input = r#""just a string""#;
+        let mut output = Vec::new();
+        let result = write_json_to_csv(
+            input.as_bytes(),
+            &mut output,
+            None,
+            None,
+            false,
+            None,
+            Some(1),
+            false,
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-object values"));
     }
 }
