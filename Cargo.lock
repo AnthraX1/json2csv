@@ -76,7 +76,7 @@ checksum = "501266b7edd0174f8530248f87f99c88fbe60ca4ef3dd486835b8d8d53136f7f"
 
 [[package]]
 name = "json2csv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pico-args",
  "rust-flatten-json",
