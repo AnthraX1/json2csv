@@ -1,15 +1,14 @@
 [package]
 name = "json2csv"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["alex wennerberg <alex@alexwennerberg.com>"]
 edition = "2018"
 description = "A tool to convert JSON to CSV"
 license = "MIT"
+repository = "https://github.com/alexwennerberg/json2csv"
+exclude = ["foo", "foo.csv", "out.csv"]
 
 [dependencies]
-serde_json = { version= "1.x",features= ["preserve_order"]}
-serde = { version = "1.x", features = ["derive"] }
-csv = "1"
-clap = "2"
-linked_hash_set = "0.x"
+serde_json = { version = "1", features = ["preserve_order"] }
+pico-args = "0.5"
 rust-flatten-json = "0.1.0"
