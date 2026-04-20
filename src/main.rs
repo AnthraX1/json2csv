@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .arg(
             Arg::with_name("double_quote")
-                .short("D")
+                .short("D") 
                 .help("Enable double quote escapes.")
                 .takes_value(false)
                 .long("double_quote"),
